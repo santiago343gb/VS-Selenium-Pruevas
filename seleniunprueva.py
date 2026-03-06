@@ -75,7 +75,7 @@ def iniciar_driver():
     chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
     driver = webdriver.Chrome(service=svc, options=chrome_options)
     return driver
-
+    
 # Función de login, por cada instancia
 def login(driver):
     driver.get(url_web)
