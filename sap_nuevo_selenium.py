@@ -20,14 +20,16 @@
 # Escrives  en : (id="M0:46:::1:34-r") el nombre/numero del proyecto
 # En id="M0:50::btn[8]-r" haces click para ejecutar 
 # Pasaras a una nueva PESTAÑA donde se muestran los hitos del proyecto
-# En la pestaña de hitos, buscas el hito/hitos que quieres modificar
-#apareceran en una tabla todos los hitos del proyecto
-# En la tabla de hitos, buscas el hito que quieres modificar (se buscan por codigo/nombre del hito)
-#En la columna "x" de la tabla se clica el hito que quieres modificar (se pueden varios en este proceso)
-#le clicas (una vez echo el paso anterior) a Modificar
-#una vez dentro solo apareceran los hitos modificables
-# aparecera un campo llamado modificar fecha real , le haces clik y automaticamente se modifican todas las fechas reales de los hitos seleccionados
-# le haces click a Guardar
+# en id id="grid#C102#1,4" esta el hito en esa tabla
+#en esa tabla se tendra que leer los hitos y selecionar lo que se quieran (entan en el power bi/excell)
+# una vez encima del hito se dan 3 flechas hacia la derecha de tal manera que estaremos encima de marcar el hito
+# se le dara a clik (es a la de hitos)
+# si hay mas hitos se puede regresar a la columna hitos ir hacia abajo o hacia arriba (como si fueran flechas) encotrar dichos hitos y repetir del proceso.
+# Se hara clik en d="M0:48::btn[25]-r" es el boton de editar hito
+# una vez dado a editar nos iremos a la columna id="grid#C134#0,7#cp1" y se ira hacia bajo dando clik a cada hito selecionado anteriormente
+#de esta manera se cambiara la fecha real del hito
+# se ira al boton id="M0:50::btn[11]-r" que es el de guardar los cambios 
+# y se le dara a clik
 # IMPORTANTE: Asegurarse de que el WebDriver y el navegador estén actualizados y sean compatibles.
 # Requiere instalar las siguientes librerías:
 # pip install selenium webdriver-manager
