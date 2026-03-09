@@ -10,10 +10,11 @@
 # 2. Navegar a la transacción ZHITOS (https://fm21global.tg.telefonica/fiori?sap-client=550&sap-language=ES#ZOBJ_Z_GESTION_HITOS_0001-display?sap-ie=edge&sap-theme=sap_belize&sap-touch=0)
 # 3. Buscar el proyecto y el hito
 # 4. Cambiar la fecha real del hito (a traves de un click en el campo de fecha)
-# 5. Guardar los cambios(otro click)
+# 5. Guardar los cambios (otro click)
 # 6. Cerrar sesión en SAP
 =========================================================================================
 '''
+
 #pasos
 #en la pagina de sap (https://fm21global.tg.telefonica/fiori?sap-client=550&sap-language=ES#ZOBJ_Z_GESTION_HITOS_0001-display?sap-ie=edge&sap-theme=sap_belize&sap-touch=0)
 # Escrives  en : (id="M0:46:::1:34-r") el nombre/numero del proyecto
@@ -33,9 +34,25 @@
 # pip install selenium-stealth
 # pip install selenium-wire
 # pip install undetected-chromedriver
-xcx
 # pip install pyautogui
 
+
+# =====================
+# CARGAR VARIABLES .ENV
+# =====================
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
+sap_user = os.getenv("FM21_USER2")
+sap_pass = os.getenv("FM21_PASS2")
+
+print("Cargando usuario/password desde .env:", sap_user, sap_pass)  # <-- bórralo si quieres
+
+
+# =====================
+# IMPORTS SELENIUM
+# =====================
 import time
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -45,6 +62,8 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
+
+
 def main():
     # Configuración del navegador
     options = Options()
@@ -59,28 +78,67 @@ def main():
         # Abrir la página de SAP
         driver.get("https://fm21global.tg.telefonica/fiori?sap-client=550&sap-language=ES#ZOBJ_Z_GESTION_HITOS_0001-display?sap-ie=edge&sap-theme=sap_belize&sap-touch=0")
         
-        # Esperar a que la página cargue completamente
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "M0:46:::1:34-r")))
+        # ==========================
+        # LOGIN AUTOMÁTICO EN SAP
+        # ==========================
+        # ⚠️ Debes sustituir estos IDs por los reales del formulario de SAP Fiori
+        USER_ID = "USERNAME_FIELD_ID"
+        PASS_ID = "PASSWORD_FIELD_ID"
+        LOGIN_BTN_ID = "LOGIN_BUTTON_ID"
+
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, USER_ID))
+        )
+
+        user_input = driver.find_element(By.ID, USER_ID)
+        pass_input = driver.find_element(By.ID, PASS_ID)
+        login_button = driver.find_element(By.ID, LOGIN_BTN_ID)
+
+        user_input.send_keys(sap_user)
+        pass_input.send_keys(sap_pass)
+        login_button.click()
+
+        # Esperar tras el login
+        time.sleep(5)
+
+        # ==========================
+        # CONTINÚA TU SCRIPT NORMAL
+        # ==========================
+
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "M0:46:::1:34-r"))
+        )
         
-        # Ingresar el nombre/numero del proyecto
         project_input = driver.find_element(By.ID, "M0:46:::1:34-r")
-        project_input.send_keys("Nombre o numero del proyecto")  # Reemplazar con el valor real
+        project_input.send_keys("Nombre o numero del proyecto")  # Reemplazar
         
-        # Hacer click en el botón de ejecutar
         execute_button = driver.find_element(By.ID, "M0:50::btn[8]-r")
         execute_button.click()
         
-        # Esperar a que se abra la nueva pestaña con los hitos del proyecto
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "sapMListTbl")))
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "sapMListTbl"))
+        )
+
+        milestone_code = "Codigo del hito"  # Reemplazar
+        milestone_row = driver.find_element(
+            By.XPATH, f"//tr[td[contains(text(), '{milestone_code}')]]"
+        )
         
-        # Buscar el hito/hitos que quieres modificar (reemplazar con el criterio de búsqueda real)
-        milestone_code = "Codigo del hito"  # Reemplazar con el código real del hito
-        milestone_row = driver.find_element(By.XPATH, f"//tr[td[contains(text(), '{milestone_code}')]]")
-        
-        # Seleccionar el hito haciendo click en la columna "x"
-        select_checkbox = milestone_row.find_element(By.XPATH, ".//td[1]//input[@type='checkbox']")
+        select_checkbox = milestone_row.find_element(
+            By.XPATH, ".//td[1]//input[@type='checkbox']"
+        )
         select_checkbox.click()
         
-        # Hacer click en Modificar
-        modify_button = driver.find_element(By.ID, "M0:50::btn[9]-r")  # Reemplazar con el ID correcto del botón Modificar
+        modify_button = driver.find_element(By.ID, "M0:50::btn[9]-r")
         modify_button.click()
+
+    except Exception as e:
+        print("ERROR:", e)
+
+    finally:
+        time.sleep(5)
+        driver.quit()
+
+
+if __name__ == "__main__":
+    main()
