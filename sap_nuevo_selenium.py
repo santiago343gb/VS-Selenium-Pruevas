@@ -46,10 +46,7 @@ load_dotenv()
 
 sap_user = os.getenv("FM21_USER2")
 sap_pass = os.getenv("FM21_PASS2")
-
-print("Cargando usuario/password desde .env:", sap_user, sap_pass)  # <-- bórralo si quieres
-
-
+# Asegúrate de que las variables de entorno FM21_USER2 y FM21_PASS2 estén definidas en tu archivo .env
 # =====================
 # IMPORTS SELENIUM
 # =====================
