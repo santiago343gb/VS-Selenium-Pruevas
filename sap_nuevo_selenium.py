@@ -33,6 +33,7 @@
 # pip install selenium-stealth
 # pip install selenium-wire
 # pip install undetected-chromedriver
+xcx
 # pip install pyautogui
 
 import time
