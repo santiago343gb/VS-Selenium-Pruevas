@@ -1,8 +1,9 @@
 ###########################################################################################
-# sap_facturar_hitos_new.py — FINAL (iframe + popup + ejecutar + zoom fallback)
+# sap_facturar_hitos_new.py — FINAL (WebGUI + selección por Nº de hito + botón robusto)
 ###########################################################################################
 
 import os
+import re
 import time
 import pandas as pd
 from dotenv import load_dotenv
@@ -15,15 +16,17 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+
 # ==========================================
 # CONFIG
 # ==========================================
 EXCEL_PATH = r"C:\Users\bt00092\Downloads\tabla_facturar.xlsx"
 CHROME_DRIVER_PATH = r"C:\Python Project\drivers\chromedriver.exe"
 
-# Si Selenium “no ve” botones o están fuera de vista, habilita zoom fallback:
-ZOOM_FALLBACK_ENABLED = True
-ZOOM_FACTORS = [0.9, 0.8]  # intentos de zoom (90%, 80%)
+FAST_WAIT = 15
+SLEEP_SHORT = 0.35
+ZOOM_LEVELS = [0.9, 0.8, 0.7]   # NO usar scroll; sólo zoom
+
 
 # ==========================================
 # UTILIDADES
@@ -33,306 +36,472 @@ def ensure_env():
     u = os.getenv("FM21_USER2")
     p = os.getenv("FM21_PASS2")
     if not u or not p:
-        raise Exception("❌ Faltan FM21_USER2 y/o FM21_PASS2 en .env")
-    print(f"🔐 Credenciales cargadas → {u}, len_pass={len(p)}")
+        raise Exception("❌ Faltan credenciales FM21_USER2/FM21_PASS2 en .env")
+    print(f"🔐 Usuario cargado: {u} (len={len(p)})")
     return u, p
 
 
-def safe_type(driver, element, text):
-    """Escribe aunque send_keys falle (inyecta por JS si es necesario)."""
+def safe_type(driver, el, txt):
+    """Escritura compatible con entornos SAP (fallback por JS)."""
     try:
-        element.clear()
-        element.send_keys(text)
+        el.clear()
+        el.send_keys(txt)
     except:
-        driver.execute_script("arguments[0].value='';", element)
+        driver.execute_script("arguments[0].value='';", el)
         driver.execute_script("""
             arguments[0].value = arguments[1];
-            arguments[0].dispatchEvent(new Event('input',{bubbles:true}));
-            arguments[0].dispatchEvent(new Event('change',{bubbles:true}));
-        """, element, text)
+            arguments[0].dispatchEvent(new Event('input', {bubbles:true}));
+            arguments[0].dispatchEvent(new Event('change', {bubbles:true}));
+        """, el, txt)
 
 
-def set_zoom_fallback(driver, factor: float):
-    """Intenta reducir zoom de la página (CDP o CSS) para que el botón quede visible."""
+def ui5_firepress(driver, cid: str) -> bool:
+    """Invoca firePress() en un control UI5 por su control-id base."""
+    script = """
+    try{
+        var c = sap.ui.getCore().byId(arguments[0]);
+        if(c && c.firePress){ c.firePress(); return true; }
+        return false;
+    }catch(e){ return false; }
+    """
     try:
-        # 1) CDP Page.setDeviceMetricsOverride (emula scaling del viewport)
-        width = driver.execute_script("return window.innerWidth;")
-        height = driver.execute_script("return window.innerHeight;")
+        return bool(driver.execute_script(script, cid))
+    except:
+        return False
+
+
+def derive_id(dom_id: str) -> str:
+    """M0:50::btn[8]-cnt → M0:50::btn[8]."""
+    if not dom_id:
+        return ""
+    for suf in ("-cnt", "-bdi", "-inner", "-img", "-icon"):
+        if dom_id.endswith(suf):
+            return dom_id[:-len(suf)]
+    return dom_id
+
+
+def wait_no_busy(driver):
+    """Espera a que desaparezca BusyIndicator/overlays."""
+    try:
+        WebDriverWait(driver, FAST_WAIT).until(
+            EC.invisibility_of_element_located(
+                (By.CSS_SELECTOR, ".sapUiBlockLayer, .sapUiLocalBusyIndicator")
+            )
+        )
+    except:
+        pass
+
+
+def set_zoom(driver, factor: float):
+    """Reduce zoom de página (intenta CDP; fallback a CSS zoom)."""
+    try:
+        w = driver.execute_script("return window.innerWidth;")
+        h = driver.execute_script("return window.innerHeight;")
         driver.execute_cdp_cmd(
             "Emulation.setDeviceMetricsOverride",
-            {"width": int(width), "height": int(height), "deviceScaleFactor": 1, "mobile": False, "scale": factor}
+            {"width": int(w), "height": int(h), "deviceScaleFactor": 1,
+             "mobile": False, "scale": factor}
         )
-        print(f"🔎 Zoom CDP aplicado (scale={factor}).")
+        print(f"🔎 Zoom CDP aplicado: {factor}")
         return
-    except Exception:
+    except:
         pass
+
     try:
-        # 2) CDP Emulation.setPageScaleFactor
-        driver.execute_cdp_cmd("Emulation.setPageScaleFactor", {"pageScaleFactor": factor})
-        print(f"🔎 Zoom Emulation.setPageScaleFactor aplicado ({factor}).")
+        driver.execute_cdp_cmd(
+            "Emulation.setPageScaleFactor",
+            {"pageScaleFactor": factor}
+        )
+        print(f"🔎 Zoom PageScaleFactor aplicado: {factor}")
         return
-    except Exception:
+    except:
         pass
+
     try:
-        # 3) CSS zoom
         driver.execute_script(f"document.body.style.zoom='{int(factor*100)}%';")
-        print(f"🔎 Zoom CSS aplicado ({int(factor*100)}%).")
-    except Exception:
-        print("⚠ No se pudo aplicar zoom; continuando sin zoom…")
+        print(f"🔎 Zoom CSS aplicado: {int(factor*100)}%")
+    except:
+        print("⚠ No se pudo aplicar zoom.")
+
+
+def dump_iframe_html(driver, path="iframe_dump.html"):
+    """Guarda el HTML que ve Selenium dentro del iframe."""
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        print(f"🧪 Dump HTML guardado en {path}")
+    except:
+        print("⚠ No se pudo guardar dump del iframe.")
+
 
 # ==========================================
 # DRIVER
 # ==========================================
 def iniciar_driver():
-    options = Options()
-    options.add_argument("--start-maximized")
-    service = Service(CHROME_DRIVER_PATH)
-    return webdriver.Chrome(service=service, options=options)
+    opt = Options()
+    opt.add_argument("--start-maximized")
+    return webdriver.Chrome(service=Service(CHROME_DRIVER_PATH), options=opt)
+
 
 # ==========================================
-# LOGIN SAP
+# LOGIN
 # ==========================================
-def login(driver, user, password):
-    url = (
+def login(driver, user, pwd):
+    URL = (
         "https://fm21global.tg.telefonica/fiori"
         "?sap-client=550&sap-language=ES"
         "#ZOBJ_Z_GESTION_HITOS_0001-display?sap-ie=edge&sap-theme=sap_belize"
     )
-    print("🌐 Abriendo SAP…")
-    driver.get(url)
-    time.sleep(2)
+    driver.get(URL)
+    time.sleep(1.2)
 
     driver.find_element(By.CSS_SELECTOR, "input[placeholder='Usuario']").send_keys(user)
-    driver.find_element(By.CSS_SELECTOR, "input[placeholder='Clave de acceso']").send_keys(password)
+    driver.find_element(By.CSS_SELECTOR, "input[placeholder='Clave de acceso']").send_keys(pwd)
     driver.find_element(By.XPATH, "//button[contains(text(),'Acceder')]").click()
+    time.sleep(1.2)
 
-    print("✔ Login completado.")
-    time.sleep(4)
+    print("✔ Login OK")
 
-# ==========================================
-# POPUP HELPERS (SAP Fiori)
-# ==========================================
-def cerrar_popup_sugerencias(driver, campo, wait: WebDriverWait):
-    """
-    Intenta cerrar/seleccionar el popup de sugerencias:
-      1) seleccionar primer elemento de UL/LI (role=listbox / suggestion-list)
-      2) seleccionar primera fila de una tabla (fallback)
-      3) ENTER + TAB
-      4) ESC
-      5) click fuera (body)
-    Lanza excepción si nada funciona.
-    """
-    # 1) UL/LI suggestion list (patrón de tus capturas)
-    try:
-        primer_item = wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "//ul[(contains(@id,'suggestion') or @role='listbox')]/li[1]")
-            )
-        )
-        primer_item.click()
-        print("✔ Popup: seleccionada primera opción de la lista (UL/LI).")
-        return
-    except Exception:
-        pass
-
-    # 2) Tabla de sugerencias
-    try:
-        primera_fila_tabla = wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "(//table[contains(@id,'__table') or contains(@class,'sapMListTbl')]/tbody/tr)[1]")
-            )
-        )
-        primera_fila_tabla.click()
-        print("✔ Popup: seleccionada primera fila de TABLA.")
-        return
-    except Exception:
-        pass
-
-    # 3) ENTER + TAB
-    try:
-        campo.send_keys(Keys.ENTER)
-        time.sleep(0.5)
-        campo.send_keys(Keys.TAB)
-        print("✔ Popup: cerrado con ENTER + TAB.")
-        return
-    except Exception:
-        pass
-
-    # 4) ESC
-    try:
-        campo.send_keys(Keys.ESCAPE)
-        print("✔ Popup: cerrado con ESC.")
-        return
-    except Exception:
-        pass
-
-    # 5) click fuera (body del iframe)
-    try:
-        driver.execute_script("document.body.click();")
-        print("✔ Popup: cerrado clicando fuera (body).")
-        return
-    except Exception:
-        pass
-
-    # Si llegamos aquí, no cerró:
-    raise Exception("❌ No pude cerrar/seleccionar el popup de sugerencias.")
 
 # ==========================================
-# CLICK EJECUTAR (en el MISMO IFRAME)
+# PÁGINA 2 — Proyecto + Ejecutar (RESTORED 100%)
 # ==========================================
-def click_ejecutar(driver, wait: WebDriverWait):
-    """
-    Clica EJECUTAR dentro del iframe:
-      A) localizar por texto (bdi) y click JS
-      B) si no, localizar por IDs SAP (M0:50::btn[0]) y click JS
-      C) si falla visibilidad, aplicar zoom fallback y reintentar
-    """
-    # A) Por texto
-    ejecutar_btn = None
-    try:
-        ejecutar_btn = wait.until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//bdi[normalize-space()='Ejecutar']/ancestor::button[1]")
-            )
-        )
-        # click por JS (evita scroll y overlays)
-        driver.execute_script("arguments[0].click();", ejecutar_btn)
-        print("✔ EJECUTAR pulsado (bdi + JS).")
-        return
-    except Exception:
-        pass
+def ejecutar_proyecto(driver, proyecto):
+    wait = WebDriverWait(driver, FAST_WAIT)
 
-    # B) Por IDs SAP dinámicos
-    candidatos = [
-        "M0:50::btn[0]", "M0:50::btn[0]-r", "M0:50::btn[1]",
-        "M0:50:::0:btn[0]"
-    ]
-    for pid in candidatos:
-        try:
-            ejecutar_btn = driver.find_element(By.ID, pid)
-            driver.execute_script("arguments[0].click();", ejecutar_btn)
-            print(f"✔ EJECUTAR pulsado por ID SAP: {pid}")
-            return
-        except Exception:
-            continue
-
-    # C) Zoom fallback y reintento por texto
-    if ZOOM_FALLBACK_ENABLED:
-        print("🔎 Activando ZOOM fallback para hacer visible el botón EJECUTAR…")
-        for factor in ZOOM_FACTORS:
-            set_zoom_fallback(driver, factor)
-            time.sleep(0.5)
-            try:
-                ejecutar_btn = wait.until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, "//bdi[normalize-space()='Ejecutar']/ancestor::button[1]")
-                    )
-                )
-                driver.execute_script("arguments[0].click();", ejecutar_btn)
-                print(f"✔ EJECUTAR pulsado tras zoom ({int(factor*100)}%).")
-                return
-            except Exception:
-                continue
-
-    # Si nada funcionó:
-    driver.save_screenshot("ERROR_ejecutar.png")
-    raise Exception("❌ No pude pulsar EJECUTAR (ver ERROR_ejecutar.png).")
-
-# ==========================================
-# BUSCAR PROYECTO — flujo completo
-# ==========================================
-def buscar_proyecto(driver, proyecto):
-    wait = WebDriverWait(driver, 30)
-    print(f"\n🔎 Insertando PROYECTO: {proyecto}")
-
-    # 1) Entrar al iframe (varios patrones)
-    try:
-        iframe = wait.until(EC.presence_of_element_located(
+    # 1) Entrar al iframe del buscador (campo + ejecutar)
+    wait.until(
+        EC.frame_to_be_available_and_switch_to_it(
             (By.XPATH, "//iframe[contains(@id,'application-ZOBJ_Z_GESTION_HITOS')]")
-        ))
-    except Exception:
-        # Alternativo por si cambia el id en otra build
-        iframe = wait.until(EC.presence_of_element_located(
-            (By.XPATH, "//iframe[contains(@id,'application-') and contains(@id,'display') and contains(@id,'iframe')]")
-        ))
-    driver.switch_to.frame(iframe)
-    time.sleep(1)
+        )
+    )
 
-    # 2) Input proyecto
-    campo = wait.until(EC.presence_of_element_located(
-        (By.XPATH, "//input[@title='Definición del proyecto']")
-    ))
+    # 2) Campo proyecto
+    campo = wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//input[@title='Definición del proyecto']")
+        )
+    )
     safe_type(driver, campo, proyecto)
+    time.sleep(SLEEP_SHORT)
+
+    # 3) Cerrar sugerencias
+    try:
+        item = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable(
+                (By.XPATH, "//ul[(contains(@id,'suggest') or @role='listbox')]/li[1]")
+            )
+        )
+        item.click()
+    except:
+        try:
+            row = WebDriverWait(driver, 4).until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, "(//table[contains(@id,'__table') or contains(@class,'sapMListTbl')]/tbody/tr)[1]")
+                )
+            )
+            row.click()
+        except:
+            try:
+                campo.send_keys(Keys.ENTER); time.sleep(SLEEP_SHORT)
+                campo.send_keys(Keys.TAB);   time.sleep(SLEEP_SHORT)
+            except:
+                try:
+                    campo.send_keys(Keys.ESCAPE)
+                except:
+                    driver.execute_script("document.body.click();")
+
+    # 4) Pulsar EJECUTAR (texto + lista de IDs original)
+    print("🔎 Buscando EJECUTAR…")
+    try:
+        node = wait.until(
+            EC.element_to_be_clickable(
+                (By.XPATH, "//*[self::bdi or self::span][normalize-space()='Ejecutar']/ancestor::*[self::button][1]")
+            )
+        )
+        dom_id = node.get_attribute("id") or ""
+        base = derive_id(dom_id)
+
+        if base and ui5_firepress(driver, base):
+            print("✔ Ejecutar con firePress")
+        else:
+            driver.execute_script("arguments[0].click();", node)
+            print(f"✔ Ejecutar JS → {dom_id}")
+
+    except:
+        print("⚠ Fallback EJECUTAR con IDs dinámicos…")
+
+        candidates = [
+            "//*[@id='M0:50::btn[8]-cnt']",
+            "//*[starts-with(@id,'M0:50::btn') and (contains(@id,'-cnt') or contains(@id,'-bdi') or contains(@id,'-inner'))]",
+            "//*[@id='M0:50::btn[8]']",
+            "//*[@id='M0:50::btn[0]']",
+        ]
+        clicked = False
+
+        for xp in candidates:
+            try:
+                node = driver.find_element(By.XPATH, xp)
+                dom_id = node.get_attribute("id") or ""
+                base = derive_id(dom_id)
+
+                if base and ui5_firepress(driver, base):
+                    print(f"✔ Ejecutar con firePress → {base}")
+                else:
+                    driver.execute_script("arguments[0].click();", node)
+                    print(f"✔ Ejecutar JS → {dom_id}")
+
+                clicked = True
+                break
+            except:
+                pass
+
+        if not clicked:
+            raise Exception("❌ No pude pulsar EJECUTAR (ni por texto ni por ID)")
+
+    driver.switch_to.default_content()
+    wait_no_busy(driver)
+    print("✔ Proyecto ejecutado, pasamos a la tabla.")
+
+
+# ======================================================================================
+# PÁGINA 3 — SELECCIONAR HITOS (SAP GUI for HTML / ITS WebGUI)
+# ======================================================================================
+def seleccionar_hitos(driver, lista_hitos):
+    """
+    Estrategia WebGUI (no SAPUI5):
+      - Detecta índice de columna de “Nº de hito” en el header (grid#...#0,<col>#cp*).
+      - Busca cada valor en data (grid#...#1,<col>#if == texto del hito).
+      - Sube a <tr> y marca el checkbox grid#...#1,1#cb por JS.
+      - Sin scroll; reintenta con zoom 90/80/70.
+      - Si falla: dump + screenshots.
+    """
+    wait = WebDriverWait(driver, FAST_WAIT)
+
+    # Entrar al iframe de la tabla (pantalla 3)
+    wait.until(
+        EC.frame_to_be_available_and_switch_to_it(
+            (By.ID, "application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
+        )
+    )
+    print("✔ Dentro del iframe de la tabla (WebGUI).")
+
+    # Espera a que el grid esté pintado
     time.sleep(0.8)
 
-    # 3) Cerrar/seleccionar popup
-    try:
-        cerrar_popup_sugerencias(driver, campo, wait)
-    except Exception as e:
-        driver.save_screenshot("ERROR_popup.png")
-        raise
+    # --- 1) Detectar índice de columna del "Nº de hito" dinámicamente ---
+    # En tu dump, el header tiene spans tipo: grid#C102#0,4#cp2 => texto "Nº de hito"
+    # Tomamos varias variantes de texto de cabecera para robustez.
+    header_text_variants = [
+        "Nº de hito",
+        "Número de hito",
+        "Nº hito",
+    ]
 
-    # 4) Pulsar EJECUTAR (mantenemos contexto dentro del iframe)
-    click_ejecutar(driver, wait)
+    def _detectar_indice_columna_hito() -> str:
+        # Busca spans header que contengan el texto de la cabecera.
+        for t in header_text_variants:
+            # El header puede estar en #cp1, #cp2, ... y siempre con #0,<COL> en el id.
+            xp = (
+                "//span[starts-with(@id,'grid#') and contains(@id,'#0,') "
+                f"and normalize-space()='{t}']"
+            )
+            headers = driver.find_elements(By.XPATH, xp)
+            if headers:
+                hid = headers[0].get_attribute("id") or ""
+                # Ej: grid#C102#0,4#cp2  -> extraer ",4#"
+                m = re.search(r"#0,(\d+)#cp", hid)
+                if m:
+                    return m.group(1)
+        # Fallback seguro: en tu dump es 4
+        return "4"
 
-    time.sleep(3)
-    print("✔ Proyecto ejecutado correctamente.")
+    col_hito = _detectar_indice_columna_hito()
+    print(f"ℹ Índice de columna 'Nº de hito' detectado: {col_hito}")
 
-# ==========================================
-# EDITAR HITOS
-# ==========================================
-def abrir_editar(driver):
-    wait = WebDriverWait(driver, 20)
+    pendientes = set(str(h).strip() for h in lista_hitos if str(h).strip())
+
+    def intentar(h: str) -> bool:
+        # 2) Buscar el span de datos EXACTO con ese hito en la columna detectada
+        xp_valor = (
+            f"//span[starts-with(@id,'grid#') and contains(@id,',{col_hito}#if') "
+            f"and normalize-space()='{h}']"
+        )
+        celdas = driver.find_elements(By.XPATH, xp_valor)
+        if not celdas:
+            return False
+
+        celda = celdas[0]
+
+        # 3) Subir a la fila real
+        try:
+            fila = celda.find_element(By.XPATH, "./ancestor::tr[1]")
+        except:
+            return False
+
+        # 4) Checkbox en col 1 => id termina en "#1,1#cb"
+        try:
+            chk = fila.find_element(By.XPATH, ".//span[contains(@id,'#1,1#cb')]")
+        except:
+            return False
+
+        # 5) Click JS
+        try:
+            driver.execute_script("arguments[0].click();", chk)
+            print(f"✔ Hito seleccionado: {h}")
+            return True
+        except:
+            # Fallback por tecla espacio, por si acaso
+            try:
+                chk.send_keys(Keys.SPACE)
+                print(f"✔ Hito seleccionado (SPACE): {h}")
+                return True
+            except:
+                return False
+
+    # --- 1er intento ---
+    for h in list(pendientes):
+        if intentar(h):
+            pendientes.remove(h)
+
+    # --- Reintentos con ZOOM (sin scroll) ---
+    if pendientes:
+        driver.switch_to.default_content()
+
+        for z in ZOOM_LEVELS:
+            set_zoom(driver, z)
+            time.sleep(0.6)
+
+            wait.until(
+                EC.frame_to_be_available_and_switch_to_it(
+                    (By.ID, "application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
+                )
+            )
+            time.sleep(0.6)
+
+            for h in list(pendientes):
+                if intentar(h):
+                    pendientes.remove(h)
+
+            driver.switch_to.default_content()
+            if not pendientes:
+                break
+
+    # --- Diagnóstico si quedan pendientes ---
+    if pendientes:
+        try:
+            wait.until(
+                EC.frame_to_be_available_and_switch_to_it(
+                    (By.ID, "application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
+                )
+            )
+            dump_iframe_html(driver, "iframe_dump.html")
+            for h in pendientes:
+                driver.save_screenshot(f"ERROR_hito_{h}.png")
+                print(f"🧪 Captura guardada: ERROR_hito_{h}.png")
+        except:
+            pass
+
+        driver.switch_to.default_content()
+        print(f"⚠ No encontrados: {sorted(pendientes)}")
+    else:
+        print("✔ Todos los hitos seleccionados (WebGUI).")
+
+
+# ======================================================================================
+# BOTÓN — “Modificación Hitos” (primero fuera; si no, dentro de WebGUI)
+# ======================================================================================
+def pulsar_modificacion_hitos(driver):
+    """
+    Intenta pulsar el botón "Modificación Hitos".
+    1) Primero FUERA del iframe (tu caso inicial con <bdi>).
+    2) Si no lo encuentra, lo intenta DENTRO del iframe WebGUI (estructura real).
+    """
+    wait = WebDriverWait(driver, FAST_WAIT)
+
+    # 1) Intento fuera de iframe (como pediste inicialmente)
+    driver.switch_to.default_content()
+    wait_no_busy(driver)
+
     try:
         btn = wait.until(
             EC.element_to_be_clickable(
-                (By.XPATH, "//bdi[normalize-space()='Editar hito']/ancestor::button")
+                (By.XPATH, "//bdi[contains(normalize-space(),'Modificación Hitos')]/ancestor::button")
             )
         )
         driver.execute_script("arguments[0].click();", btn)
-        print("🖱 'Editar hito' pulsado.")
-    except Exception:
-        raise Exception("❌ No encontré 'Editar hito'.")
-    time.sleep(2)
+        print("🖱 Pulsado → Modificación Hitos (fuera iframe)")
+        wait_no_busy(driver)
+        return
+    except:
+        print("ℹ Botón no visible fuera del iframe; probamos dentro (WebGUI).")
 
-# ==========================================
-# SELECCIONAR HITO
-# ==========================================
-def seleccionar_hito(driver, hito):
+    # 2) Intento dentro del iframe WebGUI (según DOM real)
+    # En el dump: existe un botón con id "M0:48::btn[25]" y caption "Modificación Hitos".
+    # Probaremos varios selectores compatibles con WebGUI.  [1](https://telefonicacorp-my.sharepoint.com/personal/santiago_perezalbarran_telefonica_com/_layouts/15/Doc.aspx?sourcedoc=%7BE652A0DB-077E-4EE0-BBF4-C4AC775DCD0B%7D&file=cpipasar.docx&action=default&mobileredirect=true)
     try:
-        fila = driver.find_element(By.XPATH, f"//tr[td[contains(text(),'{hito}')]]")
-        chk  = fila.find_element(By.XPATH, ".//input[@type='checkbox']")
-        driver.execute_script("arguments[0].click();", chk)
-        print(f"✔ Hito seleccionado: {hito}")
+        wait.until(
+            EC.frame_to_be_available_and_switch_to_it(
+                (By.ID, "application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
+            )
+        )
+
+        # a) Por id directo (si está)
+        try:
+            node = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.ID, "M0:48::btn[25]"))
+            )
+            driver.execute_script("arguments[0].click();", node)
+            print("🖱 Pulsado → Modificación Hitos (WebGUI por id)")
+            driver.switch_to.default_content()
+            wait_no_busy(driver)
+            return
+        except:
+            pass
+
+        # b) Por caption dentro de un botón/div WebGUI
+        candidates = [
+            # estructura típica: div[@ct='B'] con span -caption que contiene texto
+            "//div[@ct='B'][.//span[contains(@id,'-caption') and contains(normalize-space(),'Modificación Hitos')]]",
+            # cualquier nodo con caption que contenga el texto
+            "//*[contains(@id,'-caption') and contains(normalize-space(),'Modificación Hitos')]/ancestor::*[@ct='B' or @role='button' or self::div][1]",
+        ]
+        clicked = False
+        for xp in candidates:
+            try:
+                node = driver.find_element(By.XPATH, xp)
+                driver.execute_script("arguments[0].click();", node)
+                print("🖱 Pulsado → Modificación Hitos (WebGUI por caption)")
+                clicked = True
+                break
+            except:
+                continue
+
+        driver.switch_to.default_content()
+        wait_no_busy(driver)
+
+        if not clicked:
+            raise Exception("No se localizó el botón en WebGUI.")
+
     except Exception as e:
-        print(f"⚠ Hito no encontrado {hito}: {e}")
+        driver.switch_to.default_content()
+        raise Exception(f"❌ No pude pulsar 'Modificación Hitos': {e}")
+
 
 # ==========================================
-# GUARDAR (OFF)
-# ==========================================
-def guardar(driver):
-    print("🛑 Guardado desactivado por seguridad.")
-
-# ==========================================
-# CARGAR EXCEL
+# CARGA EXCEL
 # ==========================================
 def cargar_excel():
     df = pd.read_excel(EXCEL_PATH, engine="openpyxl")
-    df.columns = (df.columns.str.lower().str.replace(" ", "").str.replace(".", ""))
-    col_pep  = [c for c in df.columns if "pep" in c][0]
-    col_hito = [c for c in df.columns if "hito" in c][0]
+    df.columns = df.columns.str.lower().str.replace(" ", "").str.replace(".", "")
+    col_proj = next(c for c in df.columns if "pep" in c or "proyecto" in c)
+    col_hito = next(c for c in df.columns if "hito" in c)
 
-    df["proyecto"] = df[col_pep].astype(str).str.strip()
+    df["proyecto"] = df[col_proj].astype(str).str.strip()
+    df["codigo_hito"] = df[col_hito].astype(str).str.replace(".0", "").str.strip()
 
-    def norm(v):
-        if pd.isna(v): return ""
-        s = str(v).strip()
-        if s.endswith(".0"): s = s[:-2]
-        return s
-
-    df["codigo_hito"] = df[col_hito].apply(norm)
-    df = df[(df["proyecto"]!="") & (df["codigo_hito"]!="")]
     return df[["proyecto", "codigo_hito"]]
+
 
 # ==========================================
 # MAIN
@@ -349,20 +518,24 @@ def main():
         print(df)
 
         for proyecto, grupo in df.groupby("proyecto"):
-            buscar_proyecto(driver, proyecto)   # (dentro iframe + popup + ejecutar)
 
-            abrir_editar(driver)                # (dentro del mismo iframe)
+            # PANTALLA 2
+            ejecutar_proyecto(driver, proyecto)
 
-            for _, row in grupo.iterrows():
-                seleccionar_hito(driver, row["codigo_hito"])
+            # PANTALLA 3 (selección WebGUI)
+            seleccionar_hitos(driver, grupo["codigo_hito"].tolist())
 
-            guardar(driver)
+            # Botón superior
+            pulsar_modificacion_hitos(driver)
+
+            print(f"➡ Siguiente pantalla tras 'Modificación Hitos' para proyecto {proyecto}")
 
     except Exception as e:
         print("❌ ERROR:", e)
 
     finally:
         driver.quit()
+
 
 if __name__ == "__main__":
     main()
