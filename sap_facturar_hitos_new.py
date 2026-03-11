@@ -341,6 +341,29 @@ def pulsar_grabar(driver):
         pass
 
     raise Exception("No pude pulsar GRABAR")
+# ==============================
+# CARGA EXCEL
+# ==============================
+def cargar_excel():
+    df = pd.read_excel(EXCEL_PATH, engine="openpyxl")
+
+    # Normalizar nombres de columnas
+    df.columns = (
+        df.columns
+        .str.lower()
+        .str.replace(" ", "")
+        .str.replace(".", "")
+    )
+
+    # Detectar columnas del usuario
+    colp = next(c for c in df.columns if "pep" in c or "proyecto" in c)
+    colh = next(c for c in df.columns if "hito" in c)
+
+    # Convertir y limpiar
+    df["proyecto"] = df[colp].astype(str).str.strip()
+    df["codigo_hito"] = df[colh].astype(str).str.replace(".0", "").str.strip()
+
+    return df[["proyecto", "codigo_hito"]]
 # ======================================================================================
 # EXCEL RESULTADO OK / NOK
 # ======================================================================================
