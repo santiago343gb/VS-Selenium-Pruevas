@@ -1,5 +1,5 @@
 ###########################################################################################
-# sap_facturar_hitos_new.py — FINAL COMPLETO Y FUNCIONAL
+# sap_facturar_hitos_new.py — FINAL COMPLETO Y FUNCIONAL (sin manejo de popups)
 ###########################################################################################
 
 import os
@@ -7,6 +7,7 @@ import re
 import time
 import pandas as pd
 from dotenv import load_dotenv
+import openpyxl
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -21,8 +22,8 @@ from selenium.webdriver.support import expected_conditions as EC
 # CONFIG
 # ==============================
 EXCEL_PATH = r"C:\Users\bt00092\Downloads\tabla_facturar.xlsx"
-CHROME_DRIVER_PATH = r"C:\Python Project\drivers\chromedriver.exe"
 RESULTADO_PATH = r"C:\Users\bt00092\Downloads\resultado_hitos.xlsx"
+CHROME_DRIVER_PATH = r"C:\Python Project\drivers\chromedriver.exe"
 
 FAST_WAIT = 15
 SLEEP_SHORT = 0.35
@@ -43,7 +44,7 @@ def wait_no_busy(driver):
     try:
         WebDriverWait(driver, FAST_WAIT).until(
             EC.invisibility_of_element_located(
-                (By.CSS_SELECTOR, ".sapUiBlockLayer,.sapUiLocalBusyIndicator")
+                (By.CSS_SELECTOR, ".sapUiBlockLayer, .sapUiLocalBusyIndicator")
             )
         )
     except:
@@ -69,7 +70,16 @@ def dump_iframe_html(driver, path="iframe_dump.html"):
 def iniciar_driver():
     opts = Options()
     opts.add_argument("--start-maximized")
+
+    # ===== Estabilidad Chrome/Selenium (opción 1) =====
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-software-rasterizer")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--remote-debugging-pipe")
+
     return webdriver.Chrome(service=Service(CHROME_DRIVER_PATH), options=opts)
+
 # ==============================
 # LOGIN
 # ==============================
@@ -105,6 +115,7 @@ def ejecutar_proyecto(driver, proyecto):
     safe_type(driver, campo, proyecto)
     time.sleep(SLEEP_SHORT)
 
+    # Intentar click en la lista
     try:
         sug = WebDriverWait(driver, 4).until(
             EC.element_to_be_clickable((By.XPATH,"//ul[(contains(@id,'suggest') or @role='listbox')]/li[1]"))
@@ -117,6 +128,7 @@ def ejecutar_proyecto(driver, proyecto):
             pass
 
     print("Buscando EJECUTAR…")
+
     try:
         btn = wait.until(EC.element_to_be_clickable(
             (By.XPATH,"//*[self::bdi or self::span][normalize-space()='Ejecutar']/ancestor::button")
@@ -137,6 +149,8 @@ def ejecutar_proyecto(driver, proyecto):
 # ==============================
 def seleccionar_hitos(driver, lista_hitos):
     wait = WebDriverWait(driver, FAST_WAIT)
+
+    # entrar iframe WebGUI
     wait.until(EC.frame_to_be_available_and_switch_to_it(
         (By.ID,"application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
     ))
@@ -164,12 +178,11 @@ def seleccionar_hitos(driver, lista_hitos):
 
     for h in list(pendientes):
         xp = f"//span[starts-with(@id,'grid#') and contains(@id,',{col}#if') and normalize-space()='{h}']"
-        celdas = driver.find_elements(By.XPATH,xp)
-        if not celdas:
+        celda = driver.find_elements(By.XPATH,xp)
+        if not celda:
             continue
 
-        celda = celdas[0]
-        fila = celda.find_element(By.XPATH,"./ancestor::tr[1]")
+        fila = celda[0].find_element(By.XPATH,"./ancestor::tr[1]")
         chk = fila.find_element(By.XPATH,".//span[contains(@id,'#1,1#cb')]")
         driver.execute_script("arguments[0].click();", chk)
 
@@ -182,11 +195,12 @@ def seleccionar_hitos(driver, lista_hitos):
         print("⚠ No encontrados:", pendientes)
     else:
         print("✔ Todos los hitos seleccionados")
-# ======================================================================================
+
+# ==============================
 # DETECCIÓN DE CABECERAS (SPAN o TH)
-# ======================================================================================
+# ==============================
 def _detectar_grid_y_columna_por_titulo(driver, variantes):
-    # Buscar <span> tipo grid#C142#0,7#cp1
+    # Buscar <span>
     for t in variantes:
         xp = (
             "//span[starts-with(@id,'grid#') and contains(@id,'#0,') "
@@ -199,7 +213,7 @@ def _detectar_grid_y_columna_por_titulo(driver, variantes):
             if m:
                 return m.group(1), int(m.group(2))
 
-    # Buscar <th id="grid#C142#0,7">
+    # Buscar <th>
     for t in variantes:
         xp = (
             "//th[starts-with(@id,'grid#') and contains(@id,'#0,') "
@@ -214,9 +228,9 @@ def _detectar_grid_y_columna_por_titulo(driver, variantes):
 
     return None, None
 
-# ======================================================================================
-# MARCAR FECHA REAL DÍA
-# ======================================================================================
+# ==============================
+# MARCAR FECHA REAL DÍA — con fallback grid=C142 col=7
+# ==============================
 def marcar_fecha_real_dia(driver, lista_hitos):
     wait = WebDriverWait(driver, FAST_WAIT)
     wait.until(EC.frame_to_be_available_and_switch_to_it(
@@ -231,12 +245,12 @@ def marcar_fecha_real_dia(driver, lista_hitos):
         driver, ["Fecha Real Día", "Fecha Real Dia", "Fecha Real DÃ­a"]
     )
 
-    # FALLBACK obtenido de tu HTML real
+    # Fallback exacto según tu HTML real
     if grid_fecha is None: grid_fecha = "C142"
     if col_fecha is None: col_fecha = 7
 
     if col_hito is None:
-        raise Exception("No pude detectar la columna del hito.")
+        raise Exception("No pude detectar columna del hito.")
 
     pendientes = set(str(h).strip() for h in lista_hitos)
 
@@ -251,12 +265,11 @@ def marcar_fecha_real_dia(driver, lista_hitos):
 
         fila = celda[0].find_element(By.XPATH,"./ancestor::tr[1]")
 
-        # checkbox FRD (columna 7)
+        # checkbox FRD
         xp_cb = [
             f".//span[contains(@id,'grid#{grid_fecha}') and contains(@id,',{col_fecha}#cb')]",
             f".//span[contains(@id,',{col_fecha}#cb')]"
         ]
-        marcado = False
         for xpc in xp_cb:
             cands = fila.find_elements(By.XPATH,xpc)
             if cands:
@@ -267,7 +280,6 @@ def marcar_fecha_real_dia(driver, lista_hitos):
                     cb.send_keys(Keys.SPACE)
                 print(f"✔ Marcado FRD → {h}")
                 pendientes.remove(h)
-                marcado = True
                 break
 
     driver.switch_to.default_content()
@@ -276,9 +288,10 @@ def marcar_fecha_real_dia(driver, lista_hitos):
         print("⚠ No marqué FRD en:", pendientes)
     else:
         print("✔ FRD marcada a todos los hitos")
-# ======================================================================================
+
+# ==============================
 # BOTÓN — Modificación Hitos
-# ======================================================================================
+# ==============================
 def pulsar_modificacion_hitos(driver):
     driver.switch_to.default_content()
     wait_no_busy(driver)
@@ -302,16 +315,16 @@ def pulsar_modificacion_hitos(driver):
     # fallback Ctrl+F1
     try:
         ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.F1).key_up(Keys.CONTROL).perform()
-        print("✔ Ejecutado Ctrl+F1 (fallback)")
+        print("✔ Ejecutado Ctrl+F1")
         time.sleep(1); wait_no_busy(driver); return
     except:
         pass
 
     raise Exception("No pude pulsar Modificación Hitos")
 
-# ======================================================================================
+# ==============================
 # BOTÓN — GRABAR
-# ======================================================================================
+# ==============================
 def pulsar_grabar(driver):
     driver.switch_to.default_content()
     wait_no_busy(driver)
@@ -321,57 +334,42 @@ def pulsar_grabar(driver):
     xpaths = [
         "//div[starts-with(@id,'M') and contains(@id,'btn[11]')]",
         "//span[contains(@id,'btn[11]-caption') and contains(text(),'rabar')]/ancestor::div",
+        "//span[contains(text(),'rabar')]/ancestor::div[contains(@class,'lsButton')]"
     ]
 
+    # Click directo
     for xp in xpaths:
         try:
-            el = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.XPATH,xp)))
+            el = WebDriverWait(driver, 3).until(
+                EC.element_to_be_clickable((By.XPATH,xp))
+            )
             driver.execute_script("arguments[0].click();", el)
-            print("✔ Grabar pulsado")
-            time.sleep(1); wait_no_busy(driver); return
+            print("✔ Grabar pulsado →", xp)
+            time.sleep(1.5)
+            wait_no_busy(driver)
+            return
         except:
             pass
 
-    # fallback Ctrl+S
+    # Fallback Ctrl+S
     try:
         ActionChains(driver).key_down(Keys.CONTROL).send_keys('s').key_up(Keys.CONTROL).perform()
         print("✔ Ejecutado Ctrl+S")
-        time.sleep(1); wait_no_busy(driver); return
+        time.sleep(1.5)
+        wait_no_busy(driver)
+        return
     except:
         pass
 
-    raise Exception("No pude pulsar GRABAR")
+    raise Exception("❌ No pude pulsar GRABAR")
+
 # ==============================
-# CARGA EXCEL
-# ==============================
-def cargar_excel():
-    df = pd.read_excel(EXCEL_PATH, engine="openpyxl")
-
-    # Normalizar nombres de columnas
-    df.columns = (
-        df.columns
-        .str.lower()
-        .str.replace(" ", "")
-        .str.replace(".", "")
-    )
-
-    # Detectar columnas del usuario
-    colp = next(c for c in df.columns if "pep" in c or "proyecto" in c)
-    colh = next(c for c in df.columns if "hito" in c)
-
-    # Convertir y limpiar
-    df["proyecto"] = df[colp].astype(str).str.strip()
-    df["codigo_hito"] = df[colh].astype(str).str.replace(".0", "").str.strip()
-
-    return df[["proyecto", "codigo_hito"]]
-# ======================================================================================
 # EXCEL RESULTADO OK / NOK
-# ======================================================================================
-import openpyxl
-
+# ==============================
 def inicializar_excel_resultado(path):
     wb = openpyxl.Workbook()
     ws = wb.active
+    ws.title = "Resultado"
     ws.append(["Proyecto", "Hito", "Estado"])
     wb.save(path)
 
@@ -382,13 +380,28 @@ def escribir_resultado(path, proyecto, hito, estado):
     wb.save(path)
 
 # ==============================
+# CARGA EXCEL PRINCIPAL
+# ==============================
+def cargar_excel():
+    df = pd.read_excel(EXCEL_PATH, engine="openpyxl")
+    df.columns = df.columns.str.lower().str.replace(" ", "").str.replace(".", "")
+
+    colp = next(c for c in df.columns if "pep" in c or "proyecto" in c)
+    colh = next(c for c in df.columns if "hito" in c)
+
+    df["proyecto"] = df[colp].astype(str).str.strip()
+    # 🔧 ARREGLO: .str.strip() (no .strip())
+    df["codigo_hito"] = df[colh].astype(str).str.replace(".0", "", regex=False).str.strip()
+
+    return df[["proyecto","codigo_hito"]]
+
+# ==============================
 # MAIN
 # ==============================
 def main():
     user, pwd = ensure_env()
     driver = iniciar_driver()
 
-    # Inicializar Excel de salida
     inicializar_excel_resultado(RESULTADO_PATH)
 
     try:
@@ -398,27 +411,20 @@ def main():
 
         for proyecto, grupo in df.groupby("proyecto"):
 
-            # Pantalla 2
             ejecutar_proyecto(driver, proyecto)
-
-            # Selección hito pantalla 3
             seleccionar_hitos(driver, grupo["codigo_hito"].tolist())
 
-            # Abrir Modificación Hitos
             pulsar_modificacion_hitos(driver)
             print("✔ Modificación Hitos abierta")
 
-            # Marcar Fecha Real Día
             marcar_fecha_real_dia(driver, grupo["codigo_hito"].tolist())
 
-            # GRABAR Y REGISTRAR RESULTADO
             try:
                 pulsar_grabar(driver)
                 estado = "OK"
             except:
                 estado = "NOK"
 
-            # Registrar cada hito en Excel resultado
             for hito in grupo["codigo_hito"].tolist():
                 escribir_resultado(RESULTADO_PATH, proyecto, hito, estado)
 

@@ -1,429 +1,455 @@
-# -*- coding: utf-8 -*-
-# ==========================================================
-# SAP WebGUI — BLOQUE 1/10
-# Imports, CONFIG, utils base
-# ==========================================================
+###########################################################################################
+# sap_facturar_hitos_new.py — MULTIPROYECTO SEGURO + REINTENTOS + ZOOM
+###########################################################################################
 
 import os
 import re
-import sys
 import time
-import json
-import traceback
 import pandas as pd
 from dotenv import load_dotenv
+import openpyxl
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver import ActionChains
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+# ==============================
 # CONFIG
+# ==============================
 EXCEL_PATH = r"C:\Users\bt00092\Downloads\tabla_facturar.xlsx"
 RESULTADO_PATH = r"C:\Users\bt00092\Downloads\resultado_hitos.xlsx"
 CHROME_DRIVER_PATH = r"C:\Python Project\drivers\chromedriver.exe"
 
 FAST_WAIT = 15
-LONG_WAIT = 45
 SLEEP_SHORT = 0.35
-SLEEP_MED = 0.75
 
-# Credenciales
+# Reintentos por proyecto (para neutralizar cierres de Chrome / sesiones inválidas)
+MAX_REINTENTOS = 3
+RETRASO_ENTRE_REINTENTOS = 1.2  # seg
+
+# --- ZOOM ---
+UMBRAL_ZOOM_HITOS = 50       # si hay más de 50 hitos, aplica zoom
+FORZAR_ZOOM_SIEMPRE = False  # si True, aplica zoom siempre
+ZOOM_PORCENTAJE = 10         # porcentaje de zoom (CSS) cuando aplica
+ZOOM_CTRL_MINUS_PULSACIONES = 8  # veces Ctrl+'-' si CSS no aplica
+
+# ==============================
+# UTILIDADES
+# ==============================
 def ensure_env():
     load_dotenv()
     u = os.getenv("FM21_USER2")
     p = os.getenv("FM21_PASS2")
     if not u or not p:
-        raise RuntimeError("Faltan credenciales (.env FM21_USER2 / FM21_PASS2)")
-    print("✔ Credenciales cargadas desde .env")
+        raise Exception("Faltan credenciales (.env FM21_USER2 / FM21_PASS2)")
+    print(f"Usuario cargado: {u}")
     return u, p
 
-# Esperas globales SAP busy
-def wait_no_busy(driver, timeout=FAST_WAIT):
+def wait_no_busy(driver):
     try:
-        WebDriverWait(driver, timeout).until(
+        WebDriverWait(driver, FAST_WAIT).until(
             EC.invisibility_of_element_located(
-                (By.CSS_SELECTOR,
-                 ".sapUiBlockLayer, .sapUiLocalBusyIndicator, div[id*='busyIndicator']")
+                (By.CSS_SELECTOR, ".sapUiBlockLayer, .sapUiLocalBusyIndicator")
             )
         )
     except:
-        print("WARN: busy timeout")
+        pass
 
-# Escritura segura en inputs
 def safe_type(driver, el, txt):
     try:
         el.clear()
         el.send_keys(txt)
-        return
     except:
-        pass
-    driver.execute_script("arguments[0].value='';", el)
-    driver.execute_script("""
-        arguments[0].value = arguments[1];
-        arguments[0].dispatchEvent(new Event('input',{bubbles:true}));
-        arguments[0].dispatchEvent(new Event('change',{bubbles:true}));
-    """, el, txt)
+        driver.execute_script("arguments[0].value='';", el)
+        driver.execute_script("""
+            arguments[0].value = arguments[1];
+            arguments[0].dispatchEvent(new Event('input',{bubbles:true}));
+            arguments[0].dispatchEvent(new Event('change',{bubbles:true}));
+        """, el, txt)
 
-# Dump HTML
-def dump_html(driver, path="dump.html"):
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(driver.page_source)
-    print("HTML volcado en:", path)
+# ==============================
+# ZOOM helpers
+# ==============================
+def _apply_zoom_css_in_iframe(driver, iframe_locator, percent: int):
+    WebDriverWait(driver, FAST_WAIT).until(
+        EC.frame_to_be_available_and_switch_to_it(iframe_locator)
+    )
+    ok = False
+    try:
+        driver.execute_script("document.body.style.zoom=arguments[0];", f"{percent}%")
+        time.sleep(0.2)
+        ok = True
+        print(f"✔ Zoom CSS {percent}% aplicado en iframe")
+    except Exception as e:
+        print("⚠ No se pudo aplicar zoom CSS en iframe:", e)
+    finally:
+        driver.switch_to.default_content()
+    return ok
 
-# Driver
+def _apply_zoom_ctrl_minus(driver, veces=8):
+    try:
+        for _ in range(veces):
+            try:
+                ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.SUBTRACT).key_up(Keys.CONTROL).perform()
+            except:
+                ActionChains(driver).key_down(Keys.CONTROL).send_keys('-').key_up(Keys.CONTROL).perform()
+            time.sleep(0.08)
+        print(f"✔ Zoom navegador reducido con Ctrl+'-' x{veces}")
+    except Exception as e:
+        print("⚠ No se pudo emular Ctrl+'-':", e)
+
+def aplicar_zoom_tabla_hitos(driver, percent=10, usar_css=True):
+    iframe_locator = (By.ID, "application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
+    ok = False
+    if usar_css:
+        ok = _apply_zoom_css_in_iframe(driver, iframe_locator, percent)
+    if not ok:
+        _apply_zoom_ctrl_minus(driver, veces=ZOOM_CTRL_MINUS_PULSACIONES)
+    time.sleep(0.2)
+    wait_no_busy(driver)
+
+# ==============================
+# DRIVER NUEVO POR PROYECTO
+# ==============================
 def iniciar_driver():
     opts = Options()
     opts.add_argument("--start-maximized")
-    opts.add_argument("--lang=es-ES")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+
+    # Estabilidad con Chrome 145+
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-software-rasterizer")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--remote-debugging-pipe")
+
+    # (Opcional) reducir interferencias de Chrome
+    opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     opts.add_experimental_option("useAutomationExtension", False)
 
-    driver = webdriver.Chrome(service=Service(CHROME_DRIVER_PATH), options=opts)
-    driver.set_page_load_timeout(120)
-    print("✔ Chrome iniciado")
-    return driver
+    return webdriver.Chrome(service=Service(CHROME_DRIVER_PATH), options=opts)
 
-# Click robusto
-def click_robusto(driver, el):
-    try:
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        time.sleep(0.1)
-    except:
-        pass
-    try:
-        driver.execute_script("arguments[0].click();", el)
-        return True
-    except:
-        pass
-    try:
-        ActionChains(driver).move_to_element(el).pause(0.05).click(el).perform()
-        return True
-    except:
-        pass
-    try:
-        driver.execute_script("""
-            const e=arguments[0];
-            function fire(t){e.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true}))}
-            fire('mouseover');fire('mousedown');fire('mouseup');fire('click');
-        """, el)
-        return True
-    except:
-        print("ERROR click_robusto")
-        return False
-    # ==========================================================
-# BLOQUE 2/10 — Zoom + Scroll helpers (SAP WebGUI)
-# ==========================================================
-
-def set_zoom_global(driver, percent=10):
-    """
-    Fuerza zoom global en la página SAP.
-    Usa CDP y como fallback CSS zoom.
-    """
-    ok = False
-    try:
-        driver.execute_cdp_cmd(
-            "Emulation.setPageScaleFactor",
-            {"pageScaleFactor": percent / 100}
-        )
-        ok = True
-    except:
-        pass
-
-    try:
-        driver.execute_script(
-            "document.body.style.zoom = arguments[0];",
-            f"{percent}%"
-        )
-        ok = True
-    except:
-        pass
-
-    if ok:
-        print(f"✔ Zoom global aplicado: {percent}%")
-    else:
-        print("WARN: No se pudo aplicar zoom global")
-    return ok
-
-
-def restore_zoom(driver):
-    """
-    Restaura zoom global a 100%.
-    """
-    ok = False
-    try:
-        driver.execute_cdp_cmd(
-            "Emulation.setPageScaleFactor",
-            {"pageScaleFactor": 1}
-        )
-        ok = True
-    except:
-        pass
-
-    try:
-        driver.execute_script("document.body.style.zoom='100%';")
-        ok = True
-    except:
-        pass
-
-    if ok:
-        print("✔ Zoom restaurado a 100%")
-    else:
-        print("WARN: no fue posible restaurar zoom")
-
-
-def _find_scrollable_ancestor(driver, el):
-    """
-    Devuelve el primer ancestro que tenga scroll real.
-    """
-    return driver.execute_script("""
-        function isScrollable(n){
-            if(!n) return false;
-            const oy = getComputedStyle(n).overflowY;
-            return (oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight;
-        }
-        let c = arguments[0];
-        while (c) {
-            if (isScrollable(c)) return c;
-            c = c.parentElement;
-        }
-        return null;
-    """, el)
-
-
-def _scroll_until_condition(driver, container, xp, step=600, max_steps=200):
-    """
-    Desplaza el contenedor hasta que aparece un elemento que cumpla el xpath.
-    Devuelve esa celda o None.
-    """
-    try:
-        els = driver.find_elements(By.XPATH, xp)
-        if els:
-            return els[0]
-    except:
-        pass
-
-    if container is None:
-        try:
-            container = driver.execute_script("return document.scrollingElement")
-        except:
-            container = None
-
-    try:
-        driver.execute_script("arguments[0].scrollTop = 0;", container)
-    except:
-        pass
-
-    last = -1
-
-    for i in range(max_steps):
-        els = driver.find_elements(By.XPATH, xp)
-        if els:
-            return els[0]
-
-        try:
-            top = driver.execute_script("return arguments[0].scrollTop;", container)
-            max_top = driver.execute_script(
-                "return arguments[0].scrollHeight - arguments[0].clientHeight;",
-                container,
-            )
-        except:
-            break
-
-        if top == last or top >= max_top:
-            break
-
-        last = top
-
-        try:
-            driver.execute_script(
-                "arguments[0].scrollTop += arguments[1];",
-                container,
-                step,
-            )
-        except:
-            try:
-                driver.execute_script("window.scrollBy(0, arguments[0]);", step)
-            except:
-                pass
-
-        time.sleep(0.05)
-
-    return None
-
-
-def _buscar_celda_hito_con_scroll(driver, grid_id, col_hito, valor_hito):
-    """
-    Busca una celda de hito por scroll incremental.
-    Necesita el grid_id y el número de columna detectado.
-    """
-    xp_val = (
-        f"//span[contains(@id,'grid#{grid_id}') and "
-        f"contains(@id,',{col_hito}#if') and normalize-space()='{valor_hito}']"
-    )
-
-    # Identificar header para localizar contenedor scrollable
-    header_xp = f"//span[starts-with(@id,'grid#{grid_id}#0,')]"
-    headers = driver.find_elements(By.XPATH, header_xp)
-    container = None
-
-    if headers:
-        try:
-            container = _find_scrollable_ancestor(driver, headers[0])
-        except:
-            container = None
-
-    return _scroll_until_condition(driver, container, xp_val, step=700, max_steps=250)
-# ==========================================================
-# BLOQUE 3/10 — Login + ejecutar_proyecto + iframe helper
-# ==========================================================
-
-APP_URL = (
-    "https://fm21global.tg.telefonica/fiori"
-    "?sap-client=550&sap-language=ES"
-    "#ZOBJ_Z_GESTION_HITOS_0001-display?sap-ie=edge&sap-theme=sap_belize"
-)
-
+# ==============================
+# LOGIN
+# ==============================
 def login(driver, user, pwd):
-    """
-    Login inicial a SAP (una sola vez por driver).
-    """
-    print("Navegando a login…")
-
-    driver.switch_to.default_content()
-    driver.get(APP_URL)
-    time.sleep(1)
-
-    usr = WebDriverWait(driver, LONG_WAIT).until(
-        EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "input[placeholder='Usuario'],input[name='j_username']")
-        )
+    URL = (
+        "https://fm21global.tg.telefonica/fiori"
+        "?sap-client=550&sap-language=ES"
+        "#ZOBJ_Z_GESTION_HITOS_0001-display?sap-ie=edge&sap-theme=sap_belize"
     )
-    pwd_in = WebDriverWait(driver, FAST_WAIT).until(
-        EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "input[placeholder='Clave de acceso'],input[type='password']")
-        )
-    )
+    driver.get(URL)
+    time.sleep(1.2)
 
-    safe_type(driver, usr, user)
-    safe_type(driver, pwd_in, pwd)
-
-    btn = WebDriverWait(driver, FAST_WAIT).until(
-        EC.element_to_be_clickable(
-            (By.XPATH, "//button[contains(., 'Acceder') or contains(., 'Iniciar')]")
-        )
-    )
-    click_robusto(driver, btn)
-
-    wait_no_busy(driver, LONG_WAIT)
-    time.sleep(1)
+    driver.find_element(By.CSS_SELECTOR,"input[placeholder='Usuario']").send_keys(user)
+    driver.find_element(By.CSS_SELECTOR,"input[placeholder='Clave de acceso']").send_keys(pwd)
+    driver.find_element(By.XPATH,"//button[contains(text(),'Acceder')]").click()
+    time.sleep(1.2)
 
     print("✔ Login OK")
 
+# ==============================
+# EJECUTAR PROYECTO (robusto con F8)
+# ==============================
+def ejecutar_proyecto(driver, proyecto):
+    wait = WebDriverWait(driver, FAST_WAIT)
 
-def esperar_iframe_app(driver, retries=3):
-    """
-    Localiza el iframe principal de SAP WebGUI.
-    """
-    xp = "//iframe[contains(@id,'application-ZOBJ_Z_GESTION_HITOS')]"
+    # 1) Entrar al iframe principal de la app
+    wait.until(EC.frame_to_be_available_and_switch_to_it(
+        (By.XPATH,"//iframe[contains(@id,'application-ZOBJ_Z_GESTION_HITOS')]")
+    ))
 
-    for i in range(retries):
-        try:
-            driver.switch_to.default_content()
-            wait_no_busy(driver)
-
-            WebDriverWait(driver, FAST_WAIT).until(
-                EC.frame_to_be_available_and_switch_to_it((By.XPATH, xp))
-            )
-            print("✔ Iframe app OK")
-            return
-
-        except Exception:
-            print(f"⚠ No se detecta iframe (intento {i+1}/{retries})…")
-            time.sleep(1)
-
-    raise RuntimeError("No se encontró el iframe de la app.")
-
-
-def ejecutar_proyecto(driver, proyecto, user, pwd):
-    """
-    Ejecuta el proyecto:
-      - Asume que ya se hizo login en el driver actual
-      - Entra al iframe
-      - Escribe el proyecto
-      - Pulsa 'Ejecutar' o usa F8 como fallback
-    """
-
-    print(f"→ Ejecutando proyecto {proyecto}…")
-
-    # Entrar al iframe de la app
-    esperar_iframe_app(driver)
-
-    wait = WebDriverWait(driver, LONG_WAIT)
-
-    # Campo de proyecto
-    campo = wait.until(
-        EC.presence_of_element_located(
-            (By.XPATH, "//input[@title='Definición del proyecto']")
-        )
-    )
+    # 2) Campo de proyecto
+    campo = wait.until(EC.presence_of_element_located(
+        (By.XPATH,"//input[@title='Definición del proyecto']")
+    ))
     safe_type(driver, campo, proyecto)
     time.sleep(SLEEP_SHORT)
 
-    # Sugerencia
+    # 3) Sugerencia o Enter
     try:
-        sug = WebDriverWait(driver, 3).until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "//ul[(contains(@id,'suggest'))]/li[1]")
-            )
+        sug = WebDriverWait(driver, 4).until(
+            EC.element_to_be_clickable((By.XPATH,"//ul[(contains(@id,'suggest') or @role='listbox')]/li[1]"))
         )
-        click_robusto(driver, sug)
+        sug.click()
     except:
         try:
             campo.send_keys(Keys.ENTER)
         except:
             pass
 
-    # Botón Ejecutar
-    xps = [
-        "//*[self::bdi or self::span][normalize-space()='Ejecutar']/ancestor::button",
-        "//button[.//bdi[text()='Ejecutar']]"
-    ]
+    print("Buscando EJECUTAR…")
 
+    # 4) Click botón Ejecutar (varias estrategias)
     clicked = False
-
-    for xp in xps:
+    for xp in [
+        "//*[self::bdi or self::span][normalize-space()='Ejecutar']/ancestor::button",
+        "//button[.//bdi[normalize-space()='Ejecutar']]",
+        "//button[.//*[normalize-space()='Ejecutar']]",
+        "//*[@id='M0:50::btn[8]-cnt']/ancestor::button | //*[@id='M0:50::btn[8]-cnt']"
+    ]:
         try:
-            b = WebDriverWait(driver, 4).until(
-                EC.element_to_be_clickable((By.XPATH, xp))
-            )
-            if click_robusto(driver, b):
-                clicked = True
-                print("✔ Ejecutar pulsado")
-                break
+            btn = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, xp)))
+            driver.execute_script("arguments[0].click();", btn)
+            clicked = True
+            print("✔ Ejecutar pulsado")
+            break
         except:
             pass
 
-    # Fallback: F8
+    # 5) Fallback universal SAP: F8 (dentro del iframe)
     if not clicked:
         try:
             ActionChains(driver).send_keys(Keys.F8).perform()
             clicked = True
-            print("✔ Ejecutar por F8 (fallback)")
+            print("✔ Ejecutar por F8 (iframe)")
         except:
             pass
 
-    if not clicked:
-        raise RuntimeError("No se pudo pulsar EL BOTÓN EJECUTAR")
-
-    # Salir del iframe y esperar carga
+    # 6) Salir del iframe y espera
     driver.switch_to.default_content()
-    wait_no_busy(driver, LONG_WAIT)
-    time.sleep(SLEEP_MED)
+    wait_no_busy(driver)
+
+    # 7) Si aún no se consiguió, mando F8 también en root (algunas UIs lo escuchan)
+    if not clicked:
+        try:
+            ActionChains(driver).send_keys(Keys.F8).perform()
+            print("✔ Ejecutar por F8 (root)")
+        except:
+            print("❌ No se pudo pulsar Ejecutar (ni con F8)")
 
     print("✔ Proyecto ejecutado correctamente")
-    
+
+# ==============================
+# SELECCIONAR HITOS
+# ==============================
+def seleccionar_hitos(driver, lista_hitos):
+    wait = WebDriverWait(driver, FAST_WAIT)
+
+    wait.until(EC.frame_to_be_available_and_switch_to_it(
+        (By.ID,"application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
+    ))
+    print("✔ Dentro iframe WebGUI")
+
+    time.sleep(1.0)
+
+    header_variants = ["Nº de hito", "Número de hito", "Nº hito"]
+
+    def detectar_col():
+        for t in header_variants:
+            xp = f"//span[starts-with(@id,'grid#') and contains(@id,'#0,') and normalize-space()='{t}']"
+            h = driver.find_elements(By.XPATH,xp)
+            if h:
+                hid = h[0].get_attribute("id")
+                m = re.search(r"#0,(\d+)#cp", hid)
+                if m:
+                    return m.group(1)
+        return "4"
+
+    col = detectar_col()
+
+    pendientes = set(str(h).strip() for h in lista_hitos)
+
+    for h in list(pendientes):
+        xp = f"//span[starts-with(@id,'grid#') and contains(@id,',{col}#if') and normalize-space()='{h}']"
+        celda = driver.find_elements(By.XPATH,xp)
+        if not celda:
+            continue
+
+        fila = celda[0].find_element(By.XPATH,"./ancestor::tr[1]")
+        chk = fila.find_element(By.XPATH,".//span[contains(@id,'#1,1#cb')]")
+        driver.execute_script("arguments[0].click();", chk)
+        pendientes.remove(h)
+        print("✔ Seleccionado:", h)
+
+    driver.switch_to.default_content()
+
+# ==============================
+# MODIFICACIÓN HITOS
+# ==============================
+def pulsar_modificacion_hitos(driver):
+    driver.switch_to.default_content()
+    wait_no_busy(driver)
+    print("Pulsando Modificación Hitos…")
+
+    for xp in [
+        "//span[contains(text(),'Modificación Hitos')]/ancestor::div",
+        "//div[contains(@id,'btn[25]')]"
+    ]:
+        try:
+            btn = WebDriverWait(driver,3).until(
+                EC.element_to_be_clickable((By.XPATH,xp))
+            )
+            driver.execute_script("arguments[0].click();", btn)
+            time.sleep(1)
+            wait_no_busy(driver)
+            print("✔ Modificación Hitos abierta")
+            return
+        except:
+            pass
+
+    # Fallback atajo
+    try:
+        ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.F1).key_up(Keys.CONTROL).perform()
+        time.sleep(1)
+        wait_no_busy(driver)
+        print("✔ Modificación Hitos por Ctrl+F1")
+    except:
+        print("❌ No se pudo abrir Modificación Hitos")
+
+# ==============================
+# MARCAR FRD
+# ==============================
+def marcar_fecha_real_dia(driver, lista_hitos):
+    wait = WebDriverWait(driver, FAST_WAIT)
+    wait.until(EC.frame_to_be_available_and_switch_to_it(
+        (By.ID,"application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
+    ))
+    time.sleep(0.6)
+
+    for h in lista_hitos:
+        xp = f"//span[normalize-space()='{h}']/ancestor::tr[1]"
+        filas = driver.find_elements(By.XPATH, xp)
+        if not filas:
+            continue
+
+        fila = filas[0]
+        cb = fila.find_element(By.XPATH, ".//span[contains(@id,'#cb')]")
+        driver.execute_script("arguments[0].click();", cb)
+        print("✔ FRD marcado:", h)
+
+    driver.switch_to.default_content()
+
+# ==============================
+# GRABAR
+# ==============================
+def pulsar_grabar(driver):
+    driver.switch_to.default_content()
+    wait_no_busy(driver)
+    print("Pulsando GRABAR…")
+
+    for xp in [
+        "//span[contains(text(),'Grabar')]/ancestor::div",
+        "//div[contains(@id,'btn[11]')]"
+    ]:
+        try:
+            btn = WebDriverWait(driver,3).until(
+                EC.element_to_be_clickable((By.XPATH,xp))
+            )
+            driver.execute_script("arguments[0].click();", btn)
+            time.sleep(2)
+            wait_no_busy(driver)
+            print("✔ Grabado OK")
+            return
+        except:
+            pass
+
+    # Fallback Ctrl+S
+    try:
+        ActionChains(driver).key_down(Keys.CONTROL).send_keys('s').key_up(Keys.CONTROL).perform()
+        time.sleep(2)
+        wait_no_busy(driver)
+        print("✔ Grabado por Ctrl+S")
+    except:
+        print("❌ No se pudo pulsar Grabar")
+
+# ==============================
+# EXCEL RESULTADO
+# ==============================
+def inicializar_excel_resultado(path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Resultado"
+    ws.append(["Proyecto", "Hito", "Estado"])
+    wb.save(path)
+
+def escribir_resultado(path, proyecto, hito, estado):
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    ws.append([proyecto, hito, estado])
+    wb.save(path)
+
+# ==============================
+# CARGA EXCEL
+# ==============================
+def cargar_excel():
+    df = pd.read_excel(EXCEL_PATH, engine="openpyxl")
+    df.columns = df.columns.str.lower().str.replace(" ", "").str.replace(".", "")
+
+    colp = next(c for c in df.columns if "proyecto" in c or "pep" in c)
+    colh = next(c for c in df.columns if "hito" in c)
+
+    df["proyecto"] = df[colp].astype(str).str.strip()
+    df["codigo_hito"] = df[colh].astype(str).str.replace(".0","", regex=False).str.strip()
+
+    return df[["proyecto","codigo_hito"]]
+
+# ==============================
+# MAIN — CICLO LIMPIO POR PROYECTO + REINTENTOS + ZOOM
+# ==============================
+def main():
+    user, pwd = ensure_env()
+    df = cargar_excel()
+    inicializar_excel_resultado(RESULTADO_PATH)
+
+    for proyecto, grupo in df.groupby("proyecto"):
+        print("\n=====================================")
+        print("Procesando proyecto:", proyecto)
+        print("=====================================")
+
+        estado_final = "NOK"
+        # Reintentos por proyecto
+        for intento in range(1, MAX_REINTENTOS + 1):
+            driver = None
+            try:
+                driver = iniciar_driver()
+                login(driver, user, pwd)
+
+                ejecutar_proyecto(driver, proyecto)
+
+                # Zoom en selección si procede
+                if FORZAR_ZOOM_SIEMPRE or len(grupo) > UMBRAL_ZOOM_HITOS:
+                    print(f"Aplicando zoom {ZOOM_PORCENTAJE}% en selección de hitos…")
+                    aplicar_zoom_tabla_hitos(driver, percent=ZOOM_PORCENTAJE, usar_css=True)
+
+                seleccionar_hitos(driver, grupo["codigo_hito"].tolist())
+
+                pulsar_modificacion_hitos(driver)
+
+                # Zoom en modificación si procede
+                if FORZAR_ZOOM_SIEMPRE or len(grupo) > UMBRAL_ZOOM_HITOS:
+                    print(f"Aplicando zoom {ZOOM_PORCENTAJE}% en Modificación Hitos…")
+                    aplicar_zoom_tabla_hitos(driver, percent=ZOOM_PORCENTAJE, usar_css=True)
+
+                marcar_fecha_real_dia(driver, grupo["codigo_hito"].tolist())
+
+                pulsar_grabar(driver)
+
+                estado_final = "OK"
+                print(f"✔ Proyecto {proyecto} completado en intento {intento}")
+                break  # salir del bucle de reintentos
+
+            except Exception as e:
+                print(f"❌ Intento {intento}/{MAX_REINTENTOS} para {proyecto} falló → {e}")
+                estado_final = "NOK"
+                # Cierra y reintenta con una sesión completamente nueva
+            finally:
+                try:
+                    if driver:
+                        driver.quit()
+                except:
+                    pass
+                time.sleep(RETRASO_ENTRE_REINTENTOS)
+
+        # Registrar resultados de todos los hitos del proyecto
+        for hito in grupo["codigo_hito"].tolist():
+            escribir_resultado(RESULTADO_PATH, proyecto, hito, estado_final)
+
+    print("\n✔ PROCESO COMPLETO ✔")
+
+if __name__ == "__main__":
+    main()
