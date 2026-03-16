@@ -29,8 +29,8 @@ MAX_REINTENTOS = 3
 RETRASO_ENTRE_REINTENTOS = 1.2
 
 # Escaneo por PAGE DOWN solo como fallback (muchos hitos / render tardío)
-MAX_PAGEDOWN_PASOS = 240       # ~ 240 pantallas; ajusta si necesitas más
-SLEEP_PAGEDOWN = 0.18          # espera corta entre saltos
+MAX_PAGEDOWN_PASOS = 240
+SLEEP_PAGEDOWN = 0.18
 
 # ==============================
 # UTILIDADES
@@ -81,7 +81,7 @@ def iniciar_driver():
 def login(driver, user, pwd):
     URL = (
         "https://fm21global.tg.telefonica/fiori"
-        "?sap-client=550&sap-language=ES"
+        "?sap-client=550&amp;sap-language=ES"
         "#ZOBJ_Z_GESTION_HITOS_0001-display?sap-ie=edge&sap-theme=sap_belize"
     )
     driver.get(URL)
@@ -133,17 +133,13 @@ def ejecutar_proyecto(driver, proyecto):
     print("✔ Proyecto ejecutado correctamente")
 
 # ==============================
-# BUSCADOR ROBUSTO DE CELDA DEL HITO
+# BUSCAR CELDA DE HITO
 # ==============================
 def _buscar_celda_hito(driver, hito: str):
-    """
-    Intenta localizar la celda del hito con distintos patrones sin scroll.
-    Devuelve WebElement o None.
-    """
     patrones = [
-        f"//span[starts-with(@id,'grid#') and contains(@id,'#if') and contains(normalize-space(.), '{hito}')]",
-        f"//td[starts-with(@id,'grid#') and contains(@id,'#it') and contains(normalize-space(.), '{hito}')]",
-        f"//*[self::span or self::td or self::a][contains(normalize-space(.), '{hito}')]",
+        f"//span[contains(normalize-space(.), '{hito}')]",
+        f"//td[contains(normalize-space(.), '{hito}')]",
+        f"//*[self::span or self::td][contains(normalize-space(.), '{hito}')]"
     ]
     for xp in patrones:
         els = driver.find_elements(By.XPATH, xp)
@@ -152,20 +148,15 @@ def _buscar_celda_hito(driver, hito: str):
     return None
 
 def _focus_tabla(driver):
-    """Intenta enfocar la primera fila de la tabla para que PAGE_DOWN tenga efecto."""
     filas = driver.find_elements(By.XPATH, "//tr[starts-with(@id,'grid#')]")
-    if not filas:
-        filas = driver.find_elements(By.XPATH, "//tr[contains(@id,'grid')]")
     if filas:
         try:
             filas[0].click()
-            return True
         except:
             pass
-    return False
 
 # ==============================
-# SELECCIÓN DE HITOS (devuelve set de hitos seleccionados)
+# SELECCIÓN MÚLTIPLE — FIX REAL
 # ==============================
 def seleccionar_hitos(driver, lista_hitos):
     wait = WebDriverWait(driver, FAST_WAIT)
@@ -173,22 +164,32 @@ def seleccionar_hitos(driver, lista_hitos):
     wait.until(EC.frame_to_be_available_and_switch_to_it(
         (By.ID,"application-ZOBJ_Z_GESTION_HITOS_0001-display-iframe")
     ))
-    print("✔ Dentro de WebGUI (búsqueda directa + fallback PageDown)")
+    print("✔ Dentro de WebGUI (selección MÚLTIPLE)")
     time.sleep(0.8)
 
     acciones = ActionChains(driver)
     seleccionados = set()
 
-    # Enfocar la tabla una vez (por si necesitamos PageDown)
     _focus_tabla(driver)
 
+    # FIX importante — volver arriba antes de cada búsqueda
+    def _ir_arriba():
+        try:
+            ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.HOME).key_up(Keys.CONTROL).perform()
+            time.sleep(0.25)
+        except:
+            pass
+
     for hito in [str(h).strip() for h in lista_hitos]:
-        print(f"\n🔍 Hito a seleccionar: {hito}")
+        print(f"Hito a seleccionar: {hito}")
+
+        _focus_tabla(driver)
+        _ir_arriba()
 
         celda = _buscar_celda_hito(driver, hito)
         if not celda:
-            # Fallback: escaneo por PAGE DOWN con la tabla enfocada
             for _ in range(MAX_PAGEDOWN_PASOS):
+                _focus_tabla(driver)
                 acciones.send_keys(Keys.PAGE_DOWN).perform()
                 time.sleep(SLEEP_PAGEDOWN)
                 celda = _buscar_celda_hito(driver, hito)
@@ -201,10 +202,14 @@ def seleccionar_hitos(driver, lista_hitos):
 
         try:
             fila = celda.find_element(By.XPATH, "./ancestor::tr[1]")
-            chk = fila.find_element(By.XPATH, ".//span[contains(@id,'#cb')]")
-            driver.execute_script("arguments[0].click();", chk)
+            cb = fila.find_element(
+    By.XPATH,
+    ".//*[@role='checkbox' or contains(@id,'cb') or contains(@class,'sapMCb') or .//input[@type='checkbox']]"
+)
+            driver.execute_script("arguments[0].click();", cb)
             seleccionados.add(hito)
-            print(f"✔ Seleccionado: {hito}")
+            print(f"✔ Checkbox marcado: {hito}")       
+       
         except Exception as e:
             print(f"❌ No se pudo marcar checkbox del hito {hito}: {e}")
 
@@ -213,7 +218,7 @@ def seleccionar_hitos(driver, lista_hitos):
     return seleccionados
 
 # ==============================
-# FRD (devuelve set de hitos con FRD marcado)
+# FRD (tu original, sin cambios)
 # ==============================
 def marcar_fecha_real_dia(driver, lista_hitos):
     wait = WebDriverWait(driver, FAST_WAIT)
@@ -230,11 +235,19 @@ def marcar_fecha_real_dia(driver, lista_hitos):
     _focus_tabla(driver)
 
     for hito in [str(h).strip() for h in lista_hitos]:
-        print(f"\n🔍 FRD para: {hito}")
+        print(f"🔍 FRD para: {hito}")
+
+        # ← mismo FIX para evitar perder hitos anteriores
+        try:
+            ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.HOME).key_up(Keys.CONTROL).perform()
+            time.sleep(0.25)
+        except:
+            pass
 
         celda = _buscar_celda_hito(driver, hito)
         if not celda:
             for _ in range(MAX_PAGEDOWN_PASOS):
+                _focus_tabla(driver)
                 acciones.send_keys(Keys.PAGE_DOWN).perform()
                 time.sleep(SLEEP_PAGEDOWN)
                 celda = _buscar_celda_hito(driver, hito)
@@ -247,8 +260,6 @@ def marcar_fecha_real_dia(driver, lista_hitos):
 
         try:
             fila = celda.find_element(By.XPATH, "./ancestor::tr[1]")
-            # FRD: suele ser un #cb distinto al de selección inicial (otra columna de checks)
-            # Si sólo hay un #cb por fila, SAP marcará el que esté disponible
             cb = fila.find_element(By.XPATH, ".//span[contains(@id,'#cb')]")
             driver.execute_script("arguments[0].click();", cb)
             marcados.add(hito)
@@ -355,11 +366,10 @@ def main():
 
     for proyecto, grupo in df.groupby("proyecto"):
 
-        print("\n====================================")
+        print("====================================")
         print("Procesando proyecto:", proyecto)
         print("====================================")
 
-        # Estados por hito (default NOK hasta demostrar lo contrario)
         hitos = [str(h).strip() for h in grupo["codigo_hito"].tolist()]
         estado_por_hito = {h: "NOK" for h in hitos}
 
@@ -370,20 +380,14 @@ def main():
                 login(driver, user, pwd)
                 ejecutar_proyecto(driver, proyecto)
 
-                # 1) Seleccionar hitos → devuelve cuáles se pudieron marcar en la selección
                 seleccionados = seleccionar_hitos(driver, hitos)
 
-                # 2) Modificación Hitos
                 pulsar_modificacion_hitos(driver)
 
-                # 3) Marcar FRD → devuelve cuáles se pudieron marcar FRD
                 frd_marcados = marcar_fecha_real_dia(driver, hitos)
 
-                # 4) Grabar
                 grabado_ok = pulsar_grabar(driver)
 
-                # 5) Consolidar estado por hito:
-                #    OK sólo si (seleccionado y FRD marcado y grabado_ok)
                 for h in hitos:
                     if (h in seleccionados) and (h in frd_marcados) and grabado_ok:
                         estado_por_hito[h] = "OK"
@@ -391,11 +395,10 @@ def main():
                         estado_por_hito[h] = "NOK"
 
                 print(f"✔ Proyecto {proyecto} completado en intento {intento}")
-                break  # salimos del bucle de reintentos
+                break
 
             except Exception as e:
                 print(f"❌ Intento {intento}/{MAX_REINTENTOS} falló → {e}")
-                # Si falla el intento, dejamos los hitos en el estado que tengan (por ahora NOK)
             finally:
                 if driver:
                     try:
@@ -404,11 +407,10 @@ def main():
                         pass
                 time.sleep(RETRASO_ENTRE_REINTENTOS)
 
-        # 6) Escribir resultado por hito
-        for h in hitos:
-            escribir_resultado(RESULTADO_PATH, proyecto, h, estado_por_hito[h])
+        for hito in hitos:
+            escribir_resultado(RESULTADO_PATH, proyecto, hito, estado_por_hito[hito])
 
-    print("\n✔ PROCESO COMPLETO ✔")
+    print("✔ PROCESO COMPLETO ✔")
 
 if __name__ == "__main__":
     main()
