@@ -1,26 +1,43 @@
-###########################################################################################
-# sap_facturar_hitos_new.py
-# MULTIPROYECTO + EXCEL ÚNICO + OK/NOK EN MISMA HOJA
-# SAP Fiori / SAP UI5
-###########################################################################################
-
-import os
-import time
-import traceback
+'''
+=========================================================================================
+# sap_facturar2026.py
+# Fecha de creacion: 17/03/2026
+# Correo: santiago.perezalbarran@telefonica.com
+# Script para cambiar la fecha real de un hito de un proyecto en SAP
+# Proceso que se realiza:
+# 1. Iniciar sesión en SAP
+# 2. Navegar a la transacción ZHITOS (https://fm21global.tg.telefonica/fiori?sap-client=550&sap-language=ES#ZOBJ_Z_GESTION_HITOS_0001-display?sap-ie=edge&sap-theme=sap_belize&sap-touch=0)
+# 3. Buscar el proyecto y el hito
+# 4. Cambiar la fecha real del hito (a traves de un click en el campo de fecha)
+# 5. Guardar los cambios (otro click)
+# 6. Cerrar sesión en SAP
+=========================================================================================
+'''
+import os,sys, re,subprocess,json, codecs, time,shutil
 import pandas as pd
-from dotenv import load_dotenv
+import traceback
 import openpyxl
-
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.chrome.options import Options
+from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver import ActionChains
+from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
+from datetime import datetime
+from dotenv import load_dotenv
+path_CURRENT=os.path.dirname(os.path.realpath(__file__))
+sys.path.append(path_CURRENT+'./../')
+from utilities.data import paths
+from utilities.master import exportDF, totalTime, configureLogson
 
-
+start=datetime.now()
+load_dotenv()
 # ==============================
 # CONFIG
 # ==============================
@@ -28,13 +45,13 @@ EXCEL_PATH = r"C:\Users\bt00092\Downloads\tabla_facturar.xlsx"
 CHROME_DRIVER_PATH = r"C:\Python Project\drivers\chromedriver.exe"
 
 FILTRO_NUM_HITO_YA_PREPARADO = False
-FAST_WAIT = 30
-SLEEP_SHORT = 0.8
-SLEEP_MEDIUM = 1.5
-SLEEP_LONG = 2.5
+FAST_WAIT = 12
+SLEEP_SHORT = 0.2
+SLEEP_MEDIUM = 0.5
+SLEEP_LONG = 0.9
 
-MAX_REINTENTOS = 3
-RETRASO_ENTRE_REINTENTOS = 2.5
+MAX_REINTENTOS = 2
+RETRASO_ENTRE_REINTENTOS = 1
 
 
 # ==============================
@@ -928,10 +945,11 @@ def main():
                 ok_fecha_real = pulsar_marcar_fecha_real(driver)
                 grabado_ok = pulsar_grabar(driver)
 
-                for h in hitos:
-                   if (h in seleccionados) and ok_fecha_real and grabado_ok:
-                       estado_por_hito[h] = "OK"
-                else:
+                if ok_fecha_real and grabado_ok:
+                   for h in hitos:
+                     estado_por_hito[h] = "OK"
+                   else:
+                    for h in hitos:
                        estado_por_hito[h] = "NOK"
 
                 log(f"✔ Proyecto {proyecto} completado en intento {intento}")
@@ -955,6 +973,29 @@ def main():
     escribir_estado_en_excel(df, colp, colh, estados_global)
     log("✔ PROCESO COMPLETO — Estados escritos en tabla_facturar.xlsx")
 
+def timexHito(start, hitos_len):
+    if hitos_len == 0: return 0
+    tiempo_total = (datetime.now() - start).total_seconds()
+    tiempo_por_hito = tiempo_total / hitos_len
+    return tiempo_por_hito
 
+
+
+
+#=====================================================================
+#=====================================================================
 if __name__ == "__main__":
+
+    mylogs = configureLogson(__name__,paths['logs_local']+'santi/'+os.path.basename(__file__).rsplit('.', 1)[0]+".log")
+    mylogs.info("======================================================")
+    mylogs.info("[START-TIME]["+str(start)+"]")
+
+    mylogs.info("Script: Estamos probando el script de santiago")
+    mylogs.error("Esto es un ERROR de script")
+
+    # EJECUTAR SCRIPT PRINCIPAL
     main()
+
+    mylogs.info("[END-TIME]["+str(datetime.now())+"]")
+    mylogs.info('Total runtime: '+ str(totalTime(start, datetime.now())[0])+ ' minutes '+ str("{:.3f}".format(totalTime(start, datetime.now())[1]))+ ' seconds')
+    mylogs.info("======================================================")
